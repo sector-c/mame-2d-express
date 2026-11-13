@@ -9,8 +9,6 @@ import sqlite3
 import subprocess
 import tempfile
 import threading
-import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
 import catalog
 import graphics
 
@@ -34,6 +32,11 @@ def import_from_mame(mame_exe,db_path):
             return catalog.import_xml(db,xml)
 
 def gui():
+    try:
+        import tkinter as tk
+        from tkinter import filedialog, messagebox, ttk
+    except ImportError as exc:
+        raise SystemExit("Tkinter is required for the GUI; CLI commands still work.") from exc
     root = tk.Tk()
     root.title("MAME 2D Express | Choose game → ROM → Decode")
     root.geometry("880x740")
@@ -47,7 +50,7 @@ def gui():
     selected_var=tk.StringVar(value="No game selected")
     zip_var=tk.StringVar(value="No ROM ZIP selected")
     output_var=tk.StringVar(value=str(Path.home()/"MAME2DExpress_Output"))
-    state={"game":None,"rom":None,"extra":[],"audit":None,"busy":False}
+    state={"game":None,"rom":None,"extra":[],"audit":None,"busy":False,"can_known":False}
     q=queue.Queue()
 
     top=ttk.Frame(outer);top.pack(fill="x",pady=(0,8))
@@ -94,7 +97,7 @@ def gui():
             rows=catalog.games(db,search_var.get(),250)
         tree.delete(*tree.get_children())
         for g in rows:
-            mode=SUPPORTED.get(g["name"], "Experimental only")
+            mode=("Known layout" if g["name"] in SUPPORTED else "Experimental") + " / " + (g["review"] or "untested")
             tree.insert("", "end", iid=g["name"],values=(g["name"],g["description"],mode))
         if not rows and not search_var.get():
             append("Catalog empty. Import MAME XML or import from your installed MAME to begin.")
@@ -115,7 +118,7 @@ def gui():
         ids=tree.selection()
         if not ids:return
         game=ids[0]
-        state.update(game=game,rom=None,extra=[],audit=None)
+        state.update(game=game,rom=None,extra=[],audit=None,can_known=False)
         with catalog.connect(db_path) as db:
             info=db.execute("SELECT * FROM games WHERE name=?",(game,)).fetchone()
         selected_var.set(f"Selected: {info['description']} [{game}] / {info['sourcefile']}")
@@ -128,7 +131,7 @@ def gui():
         path=filedialog.askopenfilename(title="Choose ROM ZIP for "+state["game"],
              filetypes=[("ROM ZIP","*.zip"),("All files","*.*")])
         if path:
-            state.update(rom=path,extra=[],audit=None)
+            state.update(rom=path,extra=[],audit=None,can_known=False)
             zip_var.set(path)
             verify_button.config(state="normal")
             extra_button.config(state="normal")
@@ -140,7 +143,7 @@ def gui():
         paths=filedialog.askopenfilenames(title="Optional parent or BIOS ZIPs",
             filetypes=[("ROM ZIP","*.zip"),("All files","*.*")])
         if paths:
-            state["extra"]=list(paths);state["audit"]=None
+            state["extra"]=list(paths);state["audit"]=None;state["can_known"]=False
             zip_var.set(f"{state['rom']} + {len(paths)} parent/BIOS archive(s)")
             known_button.config(state="disabled")
             append(f"Added {len(paths)} supplemental archives. Re-verify.")
@@ -169,8 +172,19 @@ def gui():
         def success(r):
             state["audit"]=r
             append(report_text(game,r))
-            if game in SUPPORTED and r["status"] != "no_metadata":
+            state["can_known"] = False
+            if game in SUPPORTED:
+                with catalog.connect(db_path) as db:
+                    entries = catalog.roms_for(db,game)
+                gfx_regions = {spec.region for spec in graphics.layouts(game)}
+                present = {entry["region"] for entry in entries}
+                gfx_rows = [(i,e) for i,e in enumerate(entries) if e["region"] in gfx_regions]
+                state["can_known"] = (gfx_regions.issubset(present) and bool(gfx_rows)
+                    and all(i in r["matched"] and not e["loadflag"] for i,e in gfx_rows))
+            if state["can_known"]:
                 known_button.config(state="normal")
+            elif game in SUPPORTED:
+                append("Known-layout export disabled: graphics ROM data are not fully verified.")
         work(job,on_success=success)
     def extract(mode):
         game=state["game"];chosen=paths()
@@ -198,7 +212,7 @@ def gui():
                     if callback:callback(data)
                     else:append(data)
                 if state["rom"]:verify_button.config(state="normal");exp_button.config(state="normal")
-                if state["audit"] and state["game"] in SUPPORTED:
+                if state["audit"] and state["can_known"]:
                     known_button.config(state="normal")
         except queue.Empty:pass
         root.after(120,poll)

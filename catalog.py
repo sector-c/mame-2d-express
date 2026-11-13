@@ -163,8 +163,10 @@ def audit(db, game, paths):
         else:
             member = _match(rom,members)
             if member:
-                state = "match"
+                state = "known_bad_dump" if rom["status"] == "baddump" else "match"
                 matches[i] = member
+                if state == "known_bad_dump" and not ignored:
+                    unverifiable += 1
             else:
                 state = "missing_or_mismatch"
                 if not ignored:
@@ -183,7 +185,7 @@ def audit(db, game, paths):
         status = "verified"
     return {"status":status,"rows":result,"matched":matches,
             "message":f"{len(matches)} hash-matched; {missing} required missing/mismatched; "
-                      f"{unverifiable} required unverifiable."}
+                      f"{unverifiable} required unverifiable or flagged bad dumps."}
 
 def regions(db, game, paths, wanted, inspection=None):
     """Assemble ONLY contiguous ROM_LOAD regions, never guess interleaving."""
